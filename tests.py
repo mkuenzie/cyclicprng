@@ -1,3 +1,4 @@
+import threading
 import timeit
 
 from cyclicprng import CyclicPRNG
@@ -65,3 +66,90 @@ def test_size_two_cycle():
     second_cycle = [c.get_random() for _ in range(cycle_size)]
     assert len(first_cycle) == len(second_cycle) == 2
     assert first_cycle == second_cycle
+
+
+def test_event_handler_exception_does_not_wedge_generator():
+    """
+    A handler that raises must not leave the generator unusable.
+
+    The exception is still the caller's to deal with, but the generator has to
+    keep working for everyone else.
+    """
+    cycle_size = 4
+
+    def boom(event):
+        if event == "restart":
+            raise RuntimeError("handler failed")
+
+    c = CyclicPRNG(cycle_size, event_handler=boom)
+
+    values, errors = [], []
+
+    def drive():
+        for _ in range(cycle_size * 3):
+            try:
+                values.append(c.get_random())
+            except RuntimeError as exc:
+                errors.append(exc)
+
+    driver = threading.Thread(target=drive, daemon=True)
+    driver.start()
+    driver.join(timeout=10)
+
+    assert not driver.is_alive(), "generator deadlocked after a handler raised"
+    assert errors, "the handler exception should still reach the caller"
+    assert len(values) + len(errors) == cycle_size * 3
+
+
+def test_slow_handler_does_not_block_other_generators():
+    """
+    One generator's handler must not stall an unrelated generator.
+    """
+    release = threading.Event()
+    entered = threading.Event()
+
+    def slow(event):
+        if event == "restart":
+            entered.set()
+            release.wait(timeout=10)
+
+    blocking = CyclicPRNG(3, event_handler=slow)
+    unrelated = CyclicPRNG(1000)
+
+    spinner = threading.Thread(
+        target=lambda: [blocking.get_random() for _ in range(6)], daemon=True
+    )
+    spinner.start()
+    assert entered.wait(timeout=10), "the slow handler never ran"
+
+    probe = threading.Thread(target=unrelated.get_random, daemon=True)
+    probe.start()
+    probe.join(timeout=5)
+    blocked = probe.is_alive()
+
+    release.set()
+    spinner.join(timeout=10)
+
+    assert not blocked, "an unrelated generator blocked behind another's handler"
+
+
+def test_generators_have_independent_locks():
+    assert CyclicPRNG(10).mutex is not CyclicPRNG(10).mutex
+
+
+def test_restart_event_precedes_final_value():
+    """
+    The documented ordering: restart fires before the cycle's last value is
+    returned to the caller.
+    """
+    cycle_size = 5
+    seen = []
+    c = CyclicPRNG(cycle_size, event_handler=seen.append)
+    for _ in range(cycle_size):
+        seen.append(c.get_random())
+
+    assert seen[0] == "init"
+    assert "restart" in seen
+    assert seen.index("restart") == len(seen) - 2, (
+        "restart must fire immediately before the final value of the cycle"
+    )
