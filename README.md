@@ -24,6 +24,7 @@ pipenv install cyclicprng
 
 ```python
 from cyclicprng import CyclicPRNG
+
 cycle_size = 10
 c = CyclicPRNG(cycle_size)
 first_cycle = [c.get_random() for _ in range(cycle_size)]
@@ -35,6 +36,7 @@ assert first_cycle != second_cycle
 
 ```python
 from cyclicprng import CyclicPRNG
+
 cycle_size = 10
 c = CyclicPRNG(cycle_size, consistent=True)
 first_cycle = [c.get_random() for _ in range(cycle_size)]
@@ -77,6 +79,12 @@ restart
 ```
 
 You may notice that the `restart` event triggers before the last value is returned. This happens because the cycle automatically restarts when it reaches the final value in the cycle, right before that value is returned to the caller.
+
+Event handlers are invoked after `get_random()` has released its lock, so a handler is free to take its time without holding up other callers. An exception raised by a handler propagates to whoever called `get_random()`, and the generator remains usable afterwards.
+
+### Thread Safety
+
+Each `CyclicPRNG` guards its own cycle state with its own lock, so separate generators never contend with one another. Prior to 0.3.0 a single module-level `mutex` was shared by every instance in the process, and it was released without a `try`/`finally`; a handler that raised would leave it held and deadlock every generator. That module-level `mutex` is no longer exported.
 
 ### Edge Cases
 

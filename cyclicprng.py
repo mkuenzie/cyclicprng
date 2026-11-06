@@ -5,8 +5,6 @@ from typing import Optional
 
 import sympy
 
-mutex = Lock()
-
 
 def modexp(b, e, m):
     bits = [(e >> bit) & 1 for bit in range(e.bit_length())]
@@ -41,6 +39,7 @@ class CyclicPRNG:
     cycle_start_time: datetime
     completed_cycle_count: int
     consistent: bool
+    mutex: Lock
 
     def __init__(
         self,
@@ -52,6 +51,10 @@ class CyclicPRNG:
         Initialize PRNG that restarts after cycle_size calls
         """
         self.notify = []
+        # Each generator guards only its own cycle state. A lock shared between
+        # instances would make every generator in the process contend with
+        # every other one for no reason.
+        self.mutex = Lock()
         self.modulus = 0
         self.modulus_factors: dict
         self.generator = 0
@@ -156,6 +159,10 @@ class CyclicPRNG:
     def _restart_cycle(self):
         """
         Restart PRNG Cycle
+
+        Does not emit the restart event. The caller is responsible for emitting
+        it once the lock has been released, so that handlers never run while
+        other callers are blocked behind them.
         """
         if self.consistent:
             self.current = self.start
@@ -164,7 +171,6 @@ class CyclicPRNG:
             self._init_permutation()
         self.cycle_start_time = datetime.utcnow()
         self.completed_cycle_count += 1
-        self._emit_event("restart")
 
     def get_random(self):
         """
@@ -172,12 +178,17 @@ class CyclicPRNG:
         """
         if self.size <= 1:
             return 1
-        mutex.acquire()
-        value = self.current
-        self.current = self._cycle_until_in_range(
-            (self.current * self.generator) % self.modulus
-        )
-        if value == self.end:
-            self._restart_cycle()
-        mutex.release()
+        with self.mutex:
+            value = self.current
+            self.current = self._cycle_until_in_range(
+                (self.current * self.generator) % self.modulus
+            )
+            restarted = value == self.end
+            if restarted:
+                self._restart_cycle()
+        # Emitted after the lock is released. A handler may be slow or may
+        # raise, and neither should stall or deadlock other callers. The event
+        # still fires before the final value of the cycle is returned.
+        if restarted:
+            self._emit_event("restart")
         return value
